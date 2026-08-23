@@ -1750,12 +1750,28 @@ proxy.on("proxyReq", (proxyReq, req, res) => {
   if (!req.url?.startsWith("/hooks/")) {
     proxyReq.setHeader("Authorization", `Bearer ${OPENCLAW_GATEWAY_TOKEN}`);
   }
-  proxyReq.setHeader("Origin", PROXY_ORIGIN);
-});
 
-proxy.on("proxyReqWs", (proxyReq, req, socket, options, head) => {
-  proxyReq.setHeader("Authorization", `Bearer ${OPENCLAW_GATEWAY_TOKEN}`);
   proxyReq.setHeader("Origin", PROXY_ORIGIN);
+
+  // Express ya ha consumido el body JSON antes de llegar al proxy.
+  // Lo reconstruimos para que OpenClaw reciba correctamente los POST.
+  if (
+    req.body !== undefined &&
+    req.method !== "GET" &&
+    req.method !== "HEAD" &&
+    req.headers["content-type"]?.includes("application/json")
+  ) {
+    const bodyData = JSON.stringify(req.body);
+
+    proxyReq.removeHeader("transfer-encoding");
+    proxyReq.setHeader("Content-Type", "application/json");
+    proxyReq.setHeader(
+      "Content-Length",
+      Buffer.byteLength(bodyData)
+    );
+
+    proxyReq.write(bodyData);
+  }
 });
 
 app.use(async (req, res) => {
