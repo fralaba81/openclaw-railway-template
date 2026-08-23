@@ -1,0 +1,1036 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>🦞 OpenClaw — Personal AI Assistant</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script>
+  document.addEventListener('alpine:init', () => {
+    Alpine.data('setupApp', () => ({
+      step: 1,
+      totalSteps: 3,
+      status: 'Loading...',
+      configured: false,
+      openclawVersion: '',
+      authGroups: [],
+      selectedGroup: '',
+      authChoices: [],
+      selectedAuth: '',
+      authSecret: '',
+      customBaseUrl: '',
+      customModelId: '',
+      customCompatibility: 'openai',
+      cloudflareAccountId: '',
+      cloudflareGatewayId: '',
+      telegramToken: '',
+      discordToken: '',
+      slackBotToken: '',
+      slackAppToken: '',
+      model: '',
+      log: '',
+      setupError: '',
+      setupStreamTail: '',
+      loading: false,
+      pairingChannel: '',
+      pairingCode: '',
+      pairingSubmitting: false,
+      pairingResult: '',
+      pairingMessage: '',
+      showPairingModal: false,
+      isReady: false,
+      exporting: false,
+      showExportInfo: false,
+      importing: false,
+      showImportModal: false,
+      pendingImportFile: null,
+      importArchivePassword: '',
+      showDevicesModal: false,
+      devicesLoading: false,
+      devices: [],
+      devicesPending: [],
+      devicesPaired: [],
+
+      get currentGroup() {
+        return this.authGroups.find(g => g.value === this.selectedGroup);
+      },
+
+      get authRequiresSecret() {
+        return ![
+          'openai-codex-device-code',
+          'xai-device-code',
+          'google-gemini-cli',
+          'github-copilot',
+          'ollama',
+          'vllm',
+          'sglang'
+        ].includes(this.selectedAuth);
+      },
+
+      get isDeviceCode() {
+        return [
+          'openai-codex-device-code',
+          'xai-device-code'
+        ].includes(this.selectedAuth);
+      },
+
+      get authGuidance() {
+        if (this.isDeviceCode) {
+          return 'This login uses an interactive device-code flow that the web setup can\'t run. Open the Railway console and run `openclaw wizard` to complete it, then return here.';
+        }
+        if (!this.authRequiresSecret) {
+          return 'No API key is needed for this auth method.';
+        }
+        return '';
+      },
+
+      async init() {
+        await this.refreshStatus();
+      },
+
+      async httpJson(url, opts = {}) {
+        opts.credentials = 'same-origin';
+        const res = await fetch(url, opts);
+        if (!res.ok) {
+          const t = await res.text();
+          throw new Error('HTTP ' + res.status + ': ' + (t || res.statusText));
+        }
+        return res.json();
+      },
+
+      async refreshStatus() {
+        this.status = 'Loading...';
+        try {
+          const j = await this.httpJson('/setup/api/status');
+          this.configured = j.configured;
+          this.openclawVersion = j.openclawVersion || '';
+          this.status = j.configured ? 'Configured - open /openclaw' : 'Not configured - run setup below';
+          this.authGroups = j.authGroups || [];
+          if (this.authGroups.length > 0) {
+            this.selectedGroup = this.authGroups[0].value;
+            this.updateAuthChoices();
+          }
+          this.isReady = true;
+        } catch (e) {
+          this.status = 'Error: ' + String(e);
+          this.isReady = true;
+        }
+      },
+
+      updateAuthChoices() {
+        const group = this.currentGroup;
+        this.authChoices = (group && group.options) ? group.options : [];
+        if (this.authChoices.length > 0) {
+          this.selectedAuth = this.authChoices[0].value;
+        }
+      },
+
+      nextStep() {
+        if (this.step < this.totalSteps) this.step++;
+      },
+
+      prevStep() {
+        if (this.step > 1) this.step--;
+      },
+
+      async runSetup() {
+        if (this.isDeviceCode) {
+          this.setupError = 'This login must be completed from the Railway console with `openclaw wizard`.';
+          return;
+        }
+        this.setupError = '';
+        this.setupStreamTail = '';
+        const payload = {
+          authChoice: this.selectedAuth,
+          authSecret: this.authSecret,
+          model: this.model,
+          customBaseUrl: this.customBaseUrl,
+          customModelId: this.customModelId,
+          customCompatibility: this.customCompatibility,
+          cloudflareAccountId: this.cloudflareAccountId,
+          cloudflareGatewayId: this.cloudflareGatewayId,
+          telegramToken: this.telegramToken,
+          discordToken: this.discordToken,
+          slackBotToken: this.slackBotToken,
+          slackAppToken: this.slackAppToken
+        };
+
+        this.log = 'Running...\n';
+        this.loading = true;
+
+        try {
+          const res = await fetch('/setup/api/run', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+          if (res.body) {
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder();
+            while (true) {
+              const { value, done } = await reader.read();
+              if (done) break;
+              this.processSetupChunk(decoder.decode(value, { stream: true }));
+              this.$nextTick(() => {
+                const el = this.$refs.setupLog;
+                if (el) el.scrollTop = el.scrollHeight;
+              });
+            }
+            this.processSetupChunk(decoder.decode());
+          } else {
+            this.processSetupChunk(await res.text());
+          }
+          if (!res.ok && !this.setupError) {
+            this.setupError = 'Setup request failed with HTTP ' + res.status + '.';
+          }
+          await this.refreshStatus();
+        } catch (e) {
+          this.setupError = 'Setup request failed.';
+          this.processSetupChunk('\nError: ' + String(e) + '\n');
+        } finally {
+          this.loading = false;
+        }
+      },
+
+      processSetupChunk(chunk) {
+        if (!chunk) return;
+        this.log += chunk;
+        const scanText = this.setupStreamTail + chunk;
+        this.setupStreamTail = scanText.slice(-1000);
+        this.extractSetupFailure(scanText);
+      },
+
+      extractSetupFailure(text) {
+        if (text.includes('[setup] Internal error')) {
+          this.setupError = 'Setup hit an internal error. Review the log below.';
+        } else if (text.includes('[setup] Failed')) {
+          this.setupError = 'Setup failed. Review the log below.';
+        }
+      },
+
+      openPairingModal() {
+        this.pairingChannel = '';
+        this.pairingCode = '';
+        this.pairingSubmitting = false;
+        this.pairingResult = '';
+        this.pairingMessage = '';
+        this.showPairingModal = true;
+      },
+
+      async approvePairing() {
+        if (this.pairingSubmitting) return;
+        const channel = this.pairingChannel.trim().toLowerCase();
+        if (channel !== 'telegram' && channel !== 'discord') {
+          this.pairingResult = 'error';
+          this.pairingMessage = 'Choose Telegram or Discord before approving.';
+          return;
+        }
+        const code = this.pairingCode.trim();
+        if (!code) {
+          this.pairingResult = 'error';
+          this.pairingMessage = 'Enter the pairing code from the channel message.';
+          return;
+        }
+        this.pairingSubmitting = true;
+        this.pairingResult = 'pending';
+        this.pairingMessage = 'Approving channel access...';
+        this.log += '\nApproving pairing for ' + channel + '...\n';
+
+        try {
+          const res = await fetch('/setup/api/pairing/approve', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ channel: channel, code: code })
+          });
+          const t = await res.text();
+          let result;
+          try { result = JSON.parse(t); } catch (_e) { result = { ok: false, output: t }; }
+          if (result.ok) {
+            this.pairingResult = 'success';
+            this.pairingMessage = result.message || 'Channel access approved.';
+            this.log += '✓ ' + this.pairingMessage + '\n';
+          } else {
+            this.pairingResult = 'error';
+            this.pairingMessage = result.message || result.error || 'Channel approval failed.';
+            this.log += '✗ Pairing failed: ' + this.pairingMessage + '\n';
+          }
+          if (result.output) this.log += result.output.trim() + '\n';
+        } catch (e) {
+          this.pairingResult = 'error';
+          this.pairingMessage = 'Channel approval request failed. Check your connection and try again.';
+          this.log += '✗ Error: ' + String(e) + '\n';
+        } finally {
+          this.pairingSubmitting = false;
+        }
+      },
+
+      async resetSetup() {
+        if (!confirm('Reset setup? This deletes the config file so onboarding can run again.')) return;
+        this.log = 'Resetting...\n';
+        this.loading = true;
+
+        try {
+          const res = await fetch('/setup/api/reset', { method: 'POST', credentials: 'same-origin' });
+          const t = await res.text();
+          this.log += t + '\n';
+          await this.refreshStatus();
+        } catch (e) {
+          this.log += 'Error: ' + String(e) + '\n';
+        } finally {
+          this.loading = false;
+        }
+      },
+
+      async runDoctor() {
+        this.log = 'Running doctor...\n';
+        this.loading = true;
+
+        try {
+          const res = await fetch('/setup/api/doctor', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'content-type': 'application/json' }
+          });
+          const text = await res.text();
+          let j;
+          try { j = JSON.parse(text); } catch (_e) { j = { ok: false, output: text }; }
+          this.log += (j.output || JSON.stringify(j, null, 2));
+          if (j.ok) {
+            this.log += '\n✓ Doctor completed successfully\n';
+          } else {
+            this.log += '\n✗ Doctor found issues\n';
+          }
+        } catch (e) {
+          this.log += 'Error: ' + String(e) + '\n';
+        } finally {
+          this.loading = false;
+        }
+      },
+
+      async exportData() {
+        this.exporting = true;
+        this.log = 'Preparing export...\n';
+
+        try {
+          const res = await fetch('/setup/api/export', { credentials: 'same-origin' });
+          if (!res.ok) {
+            const text = await res.text();
+            let j;
+            try { j = JSON.parse(text); } catch (_e) { j = { error: text }; }
+            this.log += '✗ Export failed: ' + (j.error || j.output || text) + '\n';
+            return;
+          }
+
+          const disposition = res.headers.get('content-disposition') || '';
+          const match = disposition.match(/filename="?([^"]+)"?/);
+          const filename = match ? match[1] : 'openclaw-export.zip';
+
+          const blob = await res.blob();
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = filename;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          URL.revokeObjectURL(url);
+
+          this.log += '✓ Export downloaded: ' + filename + '\n';
+          this.showExportInfo = true;
+        } catch (e) {
+          this.log += '✗ Export error: ' + String(e) + '\n';
+        } finally {
+          this.exporting = false;
+        }
+      },
+
+      onImportFileSelected(event) {
+        const f = event.target.files && event.target.files[0];
+        event.target.value = '';
+        if (!f) return;
+        this.pendingImportFile = f;
+        this.importArchivePassword = '';
+        this.showImportModal = true;
+      },
+
+      cancelImport() {
+        if (this.importing) return;
+        this.showImportModal = false;
+        this.pendingImportFile = null;
+        this.importArchivePassword = '';
+      },
+
+      async confirmImport() {
+        const f = this.pendingImportFile;
+        if (!f) return;
+
+        const headers = { 'content-type': 'application/zip' };
+        const pw = (this.importArchivePassword || '').trim();
+        if (pw) {
+          headers['x-archive-password'] = btoa(unescape(encodeURIComponent(pw)));
+        }
+
+        this.importing = true;
+        this.log = 'Uploading ' + f.name + ' (' + f.size + ' bytes)...\n';
+
+        try {
+          const buf = await f.arrayBuffer();
+          const res = await fetch('/setup/api/import', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers,
+            body: buf,
+          });
+          const text = await res.text();
+          let j;
+          try { j = JSON.parse(text); } catch (_e) { j = { ok: res.ok, output: text }; }
+          if (j.output) this.log += j.output + '\n';
+          if (res.ok && j.ok) {
+            this.log += '✓ Import complete. Gateway restarted.\n';
+            this.showImportModal = false;
+            this.pendingImportFile = null;
+            this.importArchivePassword = '';
+            await this.refreshStatus();
+          } else {
+            this.log += '✗ Import failed: ' + (j.error || text) + '\n';
+          }
+        } catch (e) {
+          this.log += '✗ Import error: ' + String(e) + '\n';
+        } finally {
+          this.importing = false;
+        }
+      },
+
+      async openDevicesModal() {
+        this.showDevicesModal = true;
+        await this.loadDevices();
+      },
+
+      async loadDevices() {
+        this.devicesLoading = true;
+        try {
+          const j = await this.httpJson('/setup/api/devices');
+          const d = j.data;
+          if (d) {
+            if (Array.isArray(d)) {
+              this.devicesPending = d.filter(x => x.status === 'pending');
+              this.devicesPaired = d.filter(x => x.status !== 'pending');
+            } else {
+              this.devicesPending = d.pending || d.pendingRequests || d.requests || [];
+              this.devicesPaired = d.devices || d.paired || d.approved || [];
+            }
+          } else {
+            this.devicesPending = [];
+            this.devicesPaired = [];
+          }
+        } catch (e) {
+          this.log += '✗ Failed to load devices: ' + String(e) + '\n';
+        } finally {
+          this.devicesLoading = false;
+        }
+      },
+
+      async approveDevice(requestId) {
+        this.devicesLoading = true;
+        try {
+          const body = requestId ? { requestId } : {};
+          const res = await fetch('/setup/api/devices/approve', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(body)
+          });
+          const j = await res.json();
+          if (j.ok) {
+            this.log += '✓ Device approved\n';
+          } else {
+            this.log += '✗ Approve failed: ' + (j.output || j.error || 'Unknown error') + '\n';
+          }
+          await this.loadDevices();
+        } catch (e) {
+          this.log += '✗ Error: ' + String(e) + '\n';
+          this.devicesLoading = false;
+        }
+      },
+
+      async rejectDevice(requestId) {
+        this.devicesLoading = true;
+        try {
+          const res = await fetch('/setup/api/devices/reject', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ requestId })
+          });
+          const j = await res.json();
+          if (j.ok) {
+            this.log += '✓ Device rejected\n';
+          } else {
+            this.log += '✗ Reject failed: ' + (j.output || j.error || 'Unknown error') + '\n';
+          }
+          await this.loadDevices();
+        } catch (e) {
+          this.log += '✗ Error: ' + String(e) + '\n';
+          this.devicesLoading = false;
+        }
+      },
+
+    }));
+  });
+  </script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.8/dist/cdn.min.js"></script>
+</head>
+<body x-data="setupApp()">
+  <div class="container">
+    <div class="logo-wrap">
+      <picture>
+        <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/openclaw/openclaw/main/docs/assets/openclaw-logo-text-dark.png">
+        <img src="https://raw.githubusercontent.com/openclaw/openclaw/main/docs/assets/openclaw-logo-text.png" alt="OpenClaw" class="logo-img">
+      </picture>
+    </div>
+    <div style="margin-bottom:1.5rem;padding:0.75rem 1rem;border:1px solid #ef4444;border-radius:0.5rem;background:var(--bg-card)">
+      <p style="font-size:0.75rem;color:var(--text-mid);line-height:1.5;margin:0">
+        <strong style="color:#ef4444">Important:</strong> This template exposes your OpenClaw gateway to the public internet. <strong style="color:var(--text)">Please read the <a href="https://docs.openclaw.ai/gateway/security" target="_blank" style="color:var(--text);text-decoration:underline">OpenClaw security documentation</a> before deploying.</strong> If you only use chat channels (Telegram, Discord, Slack) and don't need the gateway dashboard, you can remove the public endpoint from Railway after setup.
+      </p>
+    </div>
+
+
+    <div class="card card-compact mb-6">
+      <div class="card-header">
+        <div>
+          <span class="status-label">🦞 OpenClaw</span>
+          <span x-show="openclawVersion" x-text="openclawVersion" class="status-version"></span>
+        </div>
+        <span x-text="status" class="text-sm" :class="configured ? 'status-configured' : 'status-unconfigured'"></span>
+      </div>
+      <div x-show="configured" class="card-links">
+        <a href="/openclaw" target="_blank" class="inline-link link-teal">
+          Open OpenClaw UI
+          <svg class="icon-link" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/></svg>
+        </a>
+      </div>
+    </div>
+
+    <div x-show="isReady && configured" x-cloak class="card-group">
+      <div class="card">
+        <h2 class="card-title">Setup Complete</h2>
+        <p class="text-muted text-sm">Your OpenClaw instance is configured and running</p>
+      </div>
+
+      <div class="card">
+        <h3 class="card-title" style="font-size:1rem">Devices</h3>
+        <p class="card-subtitle">Manage devices and channel access</p>
+        <div class="action-grid">
+          <div class="action-card action-blue">
+            <div class="action-card-header">
+              <div class="action-icon">
+                <svg class="icon-md" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"/></svg>
+              </div>
+              <span class="action-title">Approve Channel Access</span>
+            </div>
+            <p class="action-desc">Grant DM access to users who have requested access on Telegram or Discord.</p>
+            <button @click="openPairingModal()" :disabled="loading" class="action-btn">
+              Approve Channel Access
+            </button>
+          </div>
+
+          <div class="action-card action-violet">
+            <div class="action-card-header">
+              <div class="action-icon">
+                <svg class="icon-md" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
+              </div>
+              <span class="action-title">Manage Devices</span>
+            </div>
+            <p class="action-desc">Approve or reject browser/device pairing requests for the Control UI.</p>
+            <button @click="openDevicesModal()" :disabled="loading" class="action-btn">
+              Manage Devices
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3 class="card-title" style="font-size:1rem">Maintenance</h3>
+        <p class="card-subtitle">Health checks and data export</p>
+        <div class="action-grid mb-4">
+          <div class="action-card action-amber">
+            <div class="action-card-header">
+              <div class="action-icon">
+                <svg class="icon-md" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+              </div>
+              <span class="action-title">Run Doctor</span>
+            </div>
+            <p class="action-desc">Performs health checks and repairs broken configuration.</p>
+            <button @click="runDoctor()" :disabled="loading" class="action-btn">
+              <span x-show="!loading">Run Doctor</span>
+              <span x-show="loading" style="display:inline-flex;align-items:center;justify-content:center;gap:0.5rem">
+                <svg class="spinner-inline" fill="none" viewBox="0 0 24 24"><circle style="opacity:0.25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path style="opacity:0.75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+                Running...
+              </span>
+            </button>
+          </div>
+
+          <div class="action-card action-emerald">
+            <div class="action-card-header">
+              <div class="action-icon">
+                <svg class="icon-md" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
+              </div>
+              <span class="action-title">Export Data</span>
+            </div>
+            <p class="action-desc">Download a password-protected ZIP of your config and workspace data.</p>
+            <button @click="exportData()" :disabled="loading || exporting" class="action-btn">
+              <span x-show="!exporting">Export Data</span>
+              <span x-show="exporting" style="display:inline-flex;align-items:center;justify-content:center;gap:0.5rem">
+                <svg class="spinner-inline" fill="none" viewBox="0 0 24 24"><circle style="opacity:0.25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path style="opacity:0.75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+                Exporting...
+              </span>
+            </button>
+          </div>
+
+          <div class="action-card action-violet">
+            <div class="action-card-header">
+              <div class="action-icon">
+                <svg class="icon-md" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>
+              </div>
+              <span class="action-title">Import Data</span>
+            </div>
+            <p class="action-desc">Restore from a password-protected ZIP. Overwrites config and workspace, then restarts the gateway.</p>
+            <input x-ref="importInput" @change="onImportFileSelected($event)" type="file" accept=".zip,application/zip" style="display:none" />
+            <button @click="$refs.importInput.click()" :disabled="loading || importing || exporting" class="action-btn">
+              <span x-show="!importing">Import Data</span>
+              <span x-show="importing" style="display:inline-flex;align-items:center;justify-content:center;gap:0.5rem">
+                <svg class="spinner-inline" fill="none" viewBox="0 0 24 24"><circle style="opacity:0.25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path style="opacity:0.75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+                Importing...
+              </span>
+            </button>
+          </div>
+
+          <div class="action-card action-blue">
+            <div class="action-card-header">
+              <div class="action-icon">
+                <svg class="icon-md" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+              </div>
+              <span class="action-title">View Logs</span>
+            </div>
+            <p class="action-desc">Stream server logs in real-time for debugging and monitoring.</p>
+            <a href="/logs" target="_blank" class="action-btn" style="display:block;text-align:center;text-decoration:none">
+              View Logs
+            </a>
+          </div>
+
+          <div class="action-card action-violet">
+            <div class="action-card-header">
+              <div class="action-icon">
+                <svg class="icon-md" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
+              </div>
+              <span class="action-title">Edit Config</span>
+            </div>
+            <p class="action-desc">Directly edit <code>openclaw.json</code>. Creates a backup and restarts the gateway on save.</p>
+            <a href="/setup/config" class="action-btn" style="display:block;text-align:center;text-decoration:none">
+              Edit Config
+            </a>
+          </div>
+        </div>
+
+        <div x-show="log" class="log-output" x-text="log"></div>
+      </div>
+
+      <div class="danger-card">
+        <h3 class="danger-title">Danger Zone</h3>
+        <p class="text-muted text-sm mb-4">Destructive actions that cannot be undone</p>
+        <div class="danger-row">
+          <div>
+            <p class="danger-row-title">Reset Setup</p>
+            <p class="danger-row-desc">Deletes the config file so you can run onboarding again from scratch.</p>
+          </div>
+          <button @click="resetSetup()" :disabled="loading" class="danger-btn shrink-0">
+            Reset Setup
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div x-show="isReady && !configured" x-cloak>
+      <div class="console-card mb-6">
+        <div class="console-card-header">
+          <div class="console-icon">
+            <svg class="icon-md" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
+          </div>
+          <h3 class="card-title" style="font-size:1rem;margin-bottom:0">Prefer the command line?</h3>
+        </div>
+        <p class="console-card-desc">
+          This wizard is just one way to get started. You can also run any <code>openclaw</code> command directly using
+          Railway's built-in <strong>Console</strong> — an in-browser shell scoped to this service, no SSH client needed.
+        </p>
+        <ol class="console-steps">
+          <li>Open your project in the <strong>Railway dashboard</strong></li>
+          <li>Click this <strong>service</strong>, then open the <strong>Console</strong> tab</li>
+          <li>Use the connected shell (top) and file browser (bottom) to run commands, e.g.:</li>
+        </ol>
+        <pre class="console-cmd"><code>openclaw onboard
+openclaw models set anthropic/claude-sonnet-4-20250514</code></pre>
+      </div>
+
+      <div class="steps">
+        <template x-for="s in totalSteps" :key="s">
+          <div class="step-item">
+            <div
+              class="step-dot"
+              :class="step === s ? 'step-active' : (step > s ? 'step-done' : 'step-pending')"
+              @click="step = s"
+              x-text="s"
+            ></div>
+            <div x-show="s < totalSteps" class="step-line" :class="step > s ? 'step-line-done' : 'step-line-pending'"></div>
+          </div>
+        </template>
+      </div>
+
+      <div x-show="step === 1" x-transition:enter="fade-slide-enter" x-transition:enter-start="fade-slide-start" x-transition:enter-end="fade-slide-end">
+        <div class="card">
+          <h2 class="card-title">Model & Authentication</h2>
+          <p class="card-subtitle">Choose your AI provider and authentication method</p>
+
+          <div class="form-group">
+            <label class="label">Provider Group</label>
+            <select x-model="selectedGroup" @change="updateAuthChoices()" class="select">
+              <template x-for="g in authGroups" :key="g.value">
+                <option :value="g.value" x-text="g.label + (g.hint ? ' — ' + g.hint : '')"></option>
+              </template>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label class="label">Auth Method</label>
+            <select x-model="selectedAuth" class="select">
+              <template x-for="o in authChoices" :key="o.value">
+                <option :value="o.value" x-text="o.label + (o.hint ? ' — ' + o.hint : '')"></option>
+              </template>
+            </select>
+            <p x-show="authGuidance" class="form-hint" x-text="authGuidance"></p>
+          </div>
+
+          <div class="form-group" x-show="authRequiresSecret">
+            <label class="label">API Key / Token</label>
+            <input x-model="authSecret" type="password" placeholder="Paste your API key or token" class="input" />
+          </div>
+
+          <template x-if="selectedAuth === 'custom-api-key'">
+            <div>
+              <div class="form-group">
+                <label class="label">Base URL</label>
+                <input x-model="customBaseUrl" type="text" placeholder="e.g. https://api.example.com/v1" class="input" />
+              </div>
+              <div class="form-group">
+                <label class="label">Model ID</label>
+                <input x-model="customModelId" type="text" placeholder="e.g. my-model-id" class="input" />
+              </div>
+              <div class="form-group">
+                <label class="label">API Compatibility</label>
+                <select x-model="customCompatibility" class="select">
+                  <option value="openai">OpenAI-compatible</option>
+                  <option value="anthropic">Anthropic-compatible</option>
+                </select>
+              </div>
+            </div>
+          </template>
+
+          <template x-if="selectedAuth === 'cloudflare-ai-gateway-api-key'">
+            <div>
+              <div class="form-group">
+                <label class="label">Account ID</label>
+                <input x-model="cloudflareAccountId" type="text" placeholder="Cloudflare Account ID" class="input" />
+              </div>
+              <div class="form-group">
+                <label class="label">Gateway ID</label>
+                <input x-model="cloudflareGatewayId" type="text" placeholder="Cloudflare AI Gateway ID" class="input" />
+              </div>
+            </div>
+          </template>
+
+          <div class="form-group">
+            <label class="label">Model</label>
+            <input x-model="model" type="text" placeholder="e.g. xai/grok-4.3, openai/gpt-4.1, anthropic/claude-opus-4-8" class="input" />
+            <p class="form-hint">Format: provider/model-name</p>
+          </div>
+        </div>
+      </div>
+
+      <div x-show="step === 2" x-transition:enter="fade-slide-enter" x-transition:enter-start="fade-slide-start" x-transition:enter-end="fade-slide-end">
+        <div class="card">
+          <h2 class="card-title">Channels</h2>
+          <p class="card-subtitle">Connect messaging platforms (optional — can be added later)</p>
+
+          <div class="form-group">
+            <div class="channel-card channel-telegram">
+              <div class="channel-header">
+                <div class="channel-icon">
+                  <svg class="icon-md" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm4.64 6.8c-.15 1.58-.8 5.42-1.13 7.19-.14.75-.42 1-.68 1.03-.58.05-1.02-.38-1.58-.75-.88-.58-1.38-.94-2.23-1.5-.99-.65-.35-1.01.22-1.59.15-.15 2.71-2.48 2.76-2.69a.2.2 0 00-.05-.18c-.06-.05-.14-.03-.21-.02-.09.02-1.49.95-4.22 2.79-.4.27-.76.41-1.08.4-.36-.01-1.04-.2-1.55-.37-.63-.2-1.12-.31-1.08-.66.02-.18.27-.36.74-.55 2.92-1.27 4.86-2.11 5.83-2.51 2.78-1.16 3.35-1.36 3.73-1.36.08 0 .27.02.39.12.1.08.13.19.14.27-.01.06.01.24 0 .38z"/></svg>
+                </div>
+                <span class="channel-name">Telegram</span>
+              </div>
+              <input x-model="telegramToken" type="password" placeholder="Bot token from @BotFather" class="input" />
+              <p class="form-hint">Message <code class="code-inline">@BotFather</code> on Telegram and run <code class="code-inline">/newbot</code></p>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <div class="channel-card channel-discord">
+              <div class="channel-header">
+                <div class="channel-icon">
+                  <svg class="icon-md" viewBox="0 0 24 24" fill="currentColor"><path d="M20.317 4.37a19.791 19.791 0 00-4.885-1.515.074.074 0 00-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 00-5.487 0 12.64 12.64 0 00-.617-1.25.077.077 0 00-.079-.037A19.736 19.736 0 003.677 4.37a.07.07 0 00-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 00.031.057 19.9 19.9 0 005.993 3.03.078.078 0 00.084-.028c.462-.63.874-1.295 1.226-1.994a.076.076 0 00-.041-.106 13.107 13.107 0 01-1.872-.892.077.077 0 01-.008-.128 10.2 10.2 0 00.372-.292.074.074 0 01.077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 01.078.01c.12.098.246.198.373.292a.077.077 0 01-.006.127 12.299 12.299 0 01-1.873.892.077.077 0 00-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 00.084.028 19.839 19.839 0 006.002-3.03.077.077 0 00.032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 00-.031-.03zM8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.946 2.418-2.157 2.418z"/></svg>
+                </div>
+                <span class="channel-name">Discord</span>
+              </div>
+              <input x-model="discordToken" type="password" placeholder="Bot token from Developer Portal" class="input" />
+              <p class="form-hint">Enable <strong class="text-amber-strong">MESSAGE CONTENT INTENT</strong> in Bot → Privileged Gateway Intents</p>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <div class="channel-card channel-slack">
+              <div class="channel-header">
+                <div class="channel-icon">
+                  <svg class="icon-md" viewBox="0 0 24 24" fill="currentColor"><path d="M5.042 15.165a2.528 2.528 0 01-2.52 2.523A2.528 2.528 0 010 15.165a2.527 2.527 0 012.522-2.52h2.52v2.52zm1.271 0a2.527 2.527 0 012.521-2.52 2.527 2.527 0 012.521 2.52v6.313A2.528 2.528 0 018.834 24a2.528 2.528 0 01-2.521-2.522v-6.313zM8.834 5.042a2.528 2.528 0 01-2.521-2.52A2.528 2.528 0 018.834 0a2.528 2.528 0 012.521 2.522v2.52H8.834zm0 1.271a2.528 2.528 0 012.521 2.521 2.528 2.528 0 01-2.521 2.521H2.522A2.528 2.528 0 010 8.834a2.528 2.528 0 012.522-2.521h6.312zm10.124 2.521a2.528 2.528 0 012.522-2.521A2.528 2.528 0 0124 8.834a2.528 2.528 0 01-2.52 2.521h-2.522V8.834zm-1.271 0a2.528 2.528 0 01-2.521 2.521 2.528 2.528 0 01-2.521-2.521V2.522A2.528 2.528 0 0115.166 0a2.528 2.528 0 012.521 2.522v6.312zm-2.521 10.124a2.528 2.528 0 012.521 2.522A2.528 2.528 0 0115.166 24a2.528 2.528 0 01-2.521-2.522v-2.522h2.521zm0-1.271a2.528 2.528 0 01-2.521-2.521 2.528 2.528 0 012.521-2.521h6.312A2.528 2.528 0 0124 15.165a2.528 2.528 0 01-2.52 2.521h-6.313z"/></svg>
+                </div>
+                <span class="channel-name">Slack</span>
+              </div>
+              <input x-model="slackBotToken" type="password" placeholder="Bot token (xoxb-...)" class="input" />
+              <input x-model="slackAppToken" type="password" placeholder="App token (xapp-...)" class="input" style="margin-top:0.75rem" />
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div x-show="step === 3" x-transition:enter="fade-slide-enter" x-transition:enter-start="fade-slide-start" x-transition:enter-end="fade-slide-end">
+        <div class="card">
+          <h2 class="card-title">Run Setup</h2>
+          <p class="card-subtitle">Review your configuration and start OpenClaw</p>
+
+          <div class="config-summary">
+            <h3 class="config-summary-title">Configuration Summary</h3>
+            <dl>
+              <div class="config-row">
+                <dt>Provider</dt>
+                <dd x-text="selectedGroup || '—'"></dd>
+              </div>
+              <div class="config-row">
+                <dt>Auth</dt>
+                <dd x-text="selectedAuth || '—'"></dd>
+              </div>
+              <div class="config-row">
+                <dt>Model</dt>
+                <dd x-text="model || 'Default'"></dd>
+              </div>
+              <div class="config-row">
+                <dt>Channels</dt>
+                <dd>
+                  <span x-show="telegramToken" class="badge badge-sky">Telegram</span>
+                  <span x-show="discordToken" class="badge badge-indigo">Discord</span>
+                  <span x-show="slackBotToken && slackAppToken" class="badge badge-green">Slack</span>
+                  <span x-show="!telegramToken && !discordToken && !(slackBotToken && slackAppToken)" class="text-muted">None</span>
+                </dd>
+              </div>
+            </dl>
+          </div>
+
+          <div x-show="isDeviceCode" class="setup-error-panel">
+            This login uses an interactive device-code flow that the web setup can't run.
+            Open the Railway console and run <code class="code-inline">openclaw wizard</code> to
+            complete it, then return here. Pick a different auth method to continue in the wizard.
+          </div>
+
+          <div class="btn-row">
+            <button @click="runSetup()" :disabled="loading || isDeviceCode" class="btn btn-primary">
+              <span x-show="!loading">Run Setup</span>
+              <span x-show="loading" style="display:inline-flex;align-items:center;gap:0.5rem">
+                <svg class="spinner-inline" fill="none" viewBox="0 0 24 24"><circle style="opacity:0.25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path style="opacity:0.75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+                Running...
+              </span>
+            </button>
+            <button @click="resetSetup()" :disabled="loading" class="btn btn-ghost">
+              Reset
+            </button>
+          </div>
+
+          <div x-show="setupError" class="setup-error-panel" x-text="setupError"></div>
+
+          <div x-show="log" x-ref="setupLog" class="log-output" x-text="log"></div>
+
+          <p class="text-xs text-muted mt-4">Reset deletes the config file so you can rerun onboarding. Channel access approval grants DM access when dmPolicy=pairing.</p>
+        </div>
+      </div>
+
+      <div class="nav-row">
+        <button
+          x-show="step > 1"
+          @click="prevStep()"
+          class="nav-back"
+        >
+          <svg class="icon-md" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
+          Back
+        </button>
+        <div x-show="step === 1"></div>
+        <button
+          x-show="step < totalSteps"
+          @click="nextStep()"
+          class="nav-next"
+        >
+          Next
+          <svg class="icon-md" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+        </button>
+      </div>
+    </div>
+
+    <div x-show="showDevicesModal" x-cloak class="modal-overlay" @click.self="showDevicesModal = false">
+      <div class="modal-card modal-lg">
+        <div class="modal-header">
+          <h3 class="modal-title">Manage Devices</h3>
+          <div class="modal-actions">
+            <button @click="loadDevices()" :disabled="devicesLoading" class="btn-icon">
+              <svg class="icon-sm" :class="devicesLoading && 'spinning'" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+            </button>
+            <button @click="showDevicesModal = false" class="btn-icon">
+              <svg class="icon-sm" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+            </button>
+          </div>
+        </div>
+
+        <p class="modal-desc">When a new browser connects to the Control UI, it requires a one-time pairing approval.</p>
+
+        <button @click="approveDevice()" :disabled="devicesLoading" class="btn-violet mb-4">
+          <span x-show="!devicesLoading">Approve Latest Request</span>
+          <span x-show="devicesLoading" style="display:inline-flex;align-items:center;justify-content:center;gap:0.5rem">
+            <svg class="spinner-inline" fill="none" viewBox="0 0 24 24"><circle style="opacity:0.25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path style="opacity:0.75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+            Loading...
+          </span>
+        </button>
+
+        <div class="section-block">
+          <h4 class="section-heading">Pending Requests</h4>
+          <div x-show="devicesPending.length === 0 && !devicesLoading" class="empty-state">No pending requests</div>
+          <div class="device-list">
+            <template x-for="req in devicesPending" :key="req.requestId || req.id">
+              <div class="device-pending">
+                <div class="min-w-0 flex-1">
+                  <p class="device-pending-id truncate" x-text="req.requestId || req.id"></p>
+                  <p x-show="req.createdAt" class="device-pending-date" x-text="req.createdAt ? new Date(req.createdAt).toLocaleString() : ''"></p>
+                </div>
+                <div class="device-actions">
+                  <button @click="approveDevice(req.requestId || req.id)" :disabled="devicesLoading" class="btn-emerald">Approve</button>
+                  <button @click="rejectDevice(req.requestId || req.id)" :disabled="devicesLoading" class="btn-red-sm">Reject</button>
+                </div>
+              </div>
+            </template>
+          </div>
+        </div>
+
+        <div class="section-block">
+          <h4 class="section-heading">Paired Devices</h4>
+          <div x-show="devicesPaired.length === 0 && !devicesLoading" class="empty-state">No paired devices</div>
+          <div class="device-list">
+            <template x-for="dev in devicesPaired" :key="dev.deviceId || dev.id">
+              <div class="device-paired">
+                <div class="min-w-0 flex-1">
+                  <p class="device-paired-id truncate" x-text="dev.deviceId || dev.id"></p>
+                  <p class="device-paired-meta">
+                    <span x-show="dev.role" x-text="dev.role" class="device-role"></span>
+                    <span x-show="dev.createdAt" x-text="dev.createdAt ? new Date(dev.createdAt).toLocaleString() : ''"></span>
+                  </p>
+                </div>
+              </div>
+            </template>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div x-show="showExportInfo" x-cloak class="modal-overlay" @click.self="showExportInfo = false">
+      <div class="modal-card modal-md">
+        <h3 class="modal-title mb-4">Unzip Instructions</h3>
+        <p class="text-sm text-muted mb-4">The exported ZIP is password-protected with your <strong>SETUP_PASSWORD</strong>.</p>
+        <div class="section-block">
+          <p class="label">macOS / Linux</p>
+          <code class="code-block">unzip -P YOUR_PASSWORD openclaw-export-*.zip</code>
+        </div>
+        <div class="section-block">
+          <p class="label">Windows (PowerShell)</p>
+          <p class="text-sm text-muted">Use <a href="https://www.7-zip.org/" target="_blank" class="link-teal" style="text-decoration:underline">7-Zip</a> to extract — right-click the file, select "Extract Here", and enter your password when prompted.</p>
+        </div>
+        <div class="section-block">
+          <p class="label">Using 7z CLI</p>
+          <code class="code-block">7z x -pYOUR_PASSWORD openclaw-export-*.zip</code>
+        </div>
+        <button @click="showExportInfo = false" class="btn-close-full">Close</button>
+      </div>
+    </div>
+
+    <div x-show="showImportModal" x-cloak class="modal-overlay" @click.self="cancelImport()">
+      <div class="modal-card modal-md">
+        <h3 class="modal-title mb-4">Import Backup</h3>
+        <p class="text-sm text-muted mb-4">
+          Restoring <strong x-text="pendingImportFile?.name"></strong>
+          (<span x-text="pendingImportFile ? Math.round(pendingImportFile.size / 1024) + ' KB' : ''"></span>).
+          This overwrites your config and workspace under <code>/data</code>, then restarts the gateway.
+        </p>
+        <div class="form-group">
+          <label class="label">Archive password</label>
+          <input
+            x-model="importArchivePassword"
+            type="password"
+            autocomplete="off"
+            placeholder="Leave blank to use this instance's SETUP_PASSWORD"
+            :disabled="importing"
+            class="input"
+          />
+          <p class="text-sm text-muted" style="margin-top:0.25rem">Use the SETUP_PASSWORD of the instance the backup was exported from. Leave blank if it was this instance.</p>
+        </div>
+        <div class="btn-pair">
+          <button @click="confirmImport()" :disabled="importing" class="btn btn-primary">
+            <span x-show="!importing">Import &amp; Restart</span>
+            <span x-show="importing" style="display:inline-flex;align-items:center;gap:0.5rem">
+              <span class="spinner spinner-inline" aria-hidden="true"></span>
+              Importing
+            </span>
+          </button>
+          <button @click="cancelImport()" :disabled="importing" class="btn btn-close-full" style="margin-top:0">Cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <div x-show="showPairingModal" x-cloak class="modal-overlay" @click.self="if (!pairingSubmitting) showPairingModal = false">
+      <div class="modal-card modal-sm">
+        <h3 class="modal-title mb-4">Approve Channel Access</h3>
+        <div class="form-group">
+          <label class="label">Channel</label>
+          <select x-model="pairingChannel" @change="pairingResult = ''; pairingMessage = ''" :disabled="pairingSubmitting" class="select">
+            <option value="">Select channel...</option>
+            <option value="telegram">Telegram</option>
+            <option value="discord">Discord</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="label">Pairing Code</label>
+          <input x-model="pairingCode" @input="pairingResult = ''; pairingMessage = ''" :disabled="pairingSubmitting" type="text" placeholder="e.g. 3EY4PUYS" class="input" />
+        </div>
+        <div x-show="pairingResult" x-cloak role="status" aria-live="polite" class="pairing-status" :class="'pairing-status-' + pairingResult">
+          <span x-show="pairingResult === 'pending'" class="spinner spinner-inline" aria-hidden="true"></span>
+          <span x-text="pairingMessage"></span>
+        </div>
+        <div class="btn-pair">
+          <button @click="approvePairing()" :disabled="pairingSubmitting || pairingResult === 'success'" class="btn btn-primary">
+            <span x-show="!pairingSubmitting">Approve</span>
+            <span x-show="pairingSubmitting" style="display:inline-flex;align-items:center;gap:0.5rem">
+              <span class="spinner spinner-inline" aria-hidden="true"></span>
+              Approving
+            </span>
+          </button>
+          <button @click="showPairingModal = false" :disabled="pairingSubmitting" class="btn btn-close-full" style="margin-top:0" x-text="pairingResult === 'success' ? 'Close' : 'Cancel'"></button>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</body>
+</html>
