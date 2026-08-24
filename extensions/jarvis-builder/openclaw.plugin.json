@@ -1,1 +1,13 @@
-
+{
+  "id": "jarvis-builder",
+  "name": "Jarvis Builder",
+  "version": "1.0.0",
+  "description": "OpenClaw tools for creating, inspecting and validating Jarvis Builder proposals.",
+  "contracts": {
+    "tools": [
+      "jarvis_build_tool",
+      "jarvis_get_proposal",
+      "jarvis_run_tests"
+    ]
+  }
+}
