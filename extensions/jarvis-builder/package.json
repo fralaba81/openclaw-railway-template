@@ -2,5 +2,10 @@
   "name": "jarvis-builder-openclaw-plugin",
   "version": "1.0.0",
   "private": true,
-  "type": "module"
+  "type": "module",
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
 }
