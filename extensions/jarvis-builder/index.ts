@@ -1,27 +1,5 @@
-type ToolContext = {
-  config?: Record<string, unknown>;
-};
-
-type ToolResult = {
-  content: Array<{
-    type: "text";
-    text: string;
-  }>;
-};
-
-type ToolDefinition = {
-  name: string;
-  description: string;
-  inputSchema: Record<string, unknown>;
-  execute: (
-    args: Record<string, unknown>,
-    context: ToolContext,
-  ) => Promise<ToolResult>;
-};
-
-type OpenClawPluginApi = {
-  registerTool: (tool: ToolDefinition) => void;
-};
+import { Type } from "typebox";
+import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 
 const DEFAULT_BUILDER_URL =
   "https://jarvis-builder-qoaz-production.up.railway.app";
@@ -53,9 +31,7 @@ async function builderRequest(
         headers: {
           Accept: "application/json",
           ...(options.body
-            ? {
-                "Content-Type": "application/json",
-              }
+            ? { "Content-Type": "application/json" }
             : {}),
           ...(options.headers || {}),
         },
@@ -70,20 +46,22 @@ async function builderRequest(
       try {
         body = JSON.parse(text);
       } catch {
-        body = {
-          raw: text,
-        };
+        body = { raw: text };
       }
     }
 
     if (!response.ok) {
-      const message =
+      let message =
+        `Jarvis Builder returned HTTP ${response.status}`;
+
+      if (
         typeof body === "object" &&
         body !== null &&
         "error" in body &&
         typeof (body as { error?: unknown }).error === "string"
-          ? (body as { error: string }).error
-          : `Jarvis Builder returned HTTP ${response.status}`;
+      ) {
+        message = (body as { error: string }).error;
+      }
 
       throw new Error(message);
     }
@@ -94,182 +72,149 @@ async function builderRequest(
   }
 }
 
-function asTextResult(value: unknown): ToolResult {
+function result(value: unknown) {
   return {
     content: [
       {
-        type: "text",
+        type: "text" as const,
         text: JSON.stringify(value, null, 2),
       },
     ],
+    details: value,
   };
 }
 
-export default function register(
-  api: OpenClawPluginApi,
-): void {
-  api.registerTool({
-    name: "jarvis_build_tool",
+export default definePluginEntry({
+  id: "jarvis-builder",
+  name: "Jarvis Builder",
+  description:
+    "OpenClaw tools for creating, inspecting and validating Jarvis Builder proposals.",
 
-    description:
-      "Create a new Jarvis Builder tool proposal. This creates a proposal only and does not publish or merge code.",
+  register(api) {
+    api.registerTool({
+      name: "jarvis_build_tool",
+      description:
+        "Create a new Jarvis Builder tool proposal. Creates a proposal only. Never publishes or merges code.",
 
-    inputSchema: {
-      type: "object",
-      additionalProperties: false,
-      required: [
-        "toolName",
-        "description",
-      ],
-      properties: {
-        toolName: {
-          type: "string",
-          minLength: 1,
-          description:
-            "Short name for the tool to create.",
-        },
-
-        description: {
-          type: "string",
-          minLength: 1,
-          description:
-            "What the requested tool should do.",
-        },
-
-        requirements: {
-          type: "string",
-          description:
-            "Optional implementation requirements or constraints.",
-        },
-      },
-    },
-
-    async execute(args) {
-      const toolName =
-        String(args.toolName || "").trim();
-
-      const description =
-        String(args.description || "").trim();
-
-      const requirements =
-        String(args.requirements || "").trim();
-
-      if (!toolName || !description) {
-        throw new Error(
-          "toolName and description are required",
-        );
-      }
-
-      const result = await builderRequest(
-        "/build-tool",
+      parameters: Type.Object(
         {
-          method: "POST",
-          body: JSON.stringify({
-            toolName,
-            description,
-            requirements,
+          toolName: Type.String({
+            minLength: 1,
+            description: "Short name for the tool to create.",
+          }),
+
+          description: Type.String({
+            minLength: 1,
+            description: "What the requested tool should do.",
+          }),
+
+          requirements: Type.Optional(
+            Type.String({
+              description:
+                "Optional implementation requirements or constraints.",
+            }),
+          ),
+        },
+        {
+          additionalProperties: false,
+        },
+      ),
+
+      async execute(_id, params) {
+        const toolName = params.toolName.trim();
+        const description = params.description.trim();
+        const requirements =
+          params.requirements?.trim() || "";
+
+        const response = await builderRequest(
+          "/build-tool",
+          {
+            method: "POST",
+            body: JSON.stringify({
+              toolName,
+              description,
+              requirements,
+            }),
+          },
+        );
+
+        return result(response);
+      },
+    });
+
+    api.registerTool({
+      name: "jarvis_get_proposal",
+      description:
+        "Retrieve an existing Jarvis Builder proposal by toolId.",
+
+      parameters: Type.Object(
+        {
+          toolId: Type.String({
+            minLength: 1,
+            description:
+              "Proposal toolId returned by jarvis_build_tool.",
           }),
         },
-      );
-
-      return asTextResult(result);
-    },
-  });
-
-  api.registerTool({
-    name: "jarvis_get_proposal",
-
-    description:
-      "Retrieve a Jarvis Builder proposal by toolId.",
-
-    inputSchema: {
-      type: "object",
-      additionalProperties: false,
-      required: [
-        "toolId",
-      ],
-      properties: {
-        toolId: {
-          type: "string",
-          minLength: 1,
-          description:
-            "The proposal toolId returned by jarvis_build_tool.",
-        },
-      },
-    },
-
-    async execute(args) {
-      const toolId =
-        String(args.toolId || "").trim();
-
-      if (!toolId) {
-        throw new Error(
-          "toolId is required",
-        );
-      }
-
-      const result = await builderRequest(
-        `/proposal/${encodeURIComponent(toolId)}`,
-      );
-
-      return asTextResult(result);
-    },
-  });
-
-  api.registerTool({
-    name: "jarvis_run_tests",
-
-    description:
-      "Run Jarvis Builder validation for an existing proposal. This performs validation only and does not publish or merge code.",
-
-    inputSchema: {
-      type: "object",
-      additionalProperties: false,
-      required: [
-        "toolId",
-      ],
-      properties: {
-        toolId: {
-          type: "string",
-          minLength: 1,
-          description:
-            "The proposal toolId to validate.",
-        },
-
-        testType: {
-          type: "string",
-          default: "all",
-          description:
-            "Validation type. Use all unless a different supported test type is required.",
-        },
-      },
-    },
-
-    async execute(args) {
-      const toolId =
-        String(args.toolId || "").trim();
-
-      const testType =
-        String(args.testType || "all").trim();
-
-      if (!toolId) {
-        throw new Error(
-          "toolId is required",
-        );
-      }
-
-      const result = await builderRequest(
-        "/run-tests",
         {
-          method: "POST",
-          body: JSON.stringify({
-            toolId,
-            testType,
-          }),
+          additionalProperties: false,
         },
-      );
+      ),
 
-      return asTextResult(result);
-    },
-  });
-}
+      async execute(_id, params) {
+        const toolId = params.toolId.trim();
+
+        const response = await builderRequest(
+          `/proposal/${encodeURIComponent(toolId)}`,
+        );
+
+        return result(response);
+      },
+    });
+
+    api.registerTool({
+      name: "jarvis_run_tests",
+      description:
+        "Validate an existing Jarvis Builder proposal. Validation only. Never publishes or merges code.",
+
+      parameters: Type.Object(
+        {
+          toolId: Type.String({
+            minLength: 1,
+            description:
+              "Proposal toolId to validate.",
+          }),
+
+          testType: Type.Optional(
+            Type.String({
+              default: "all",
+              description:
+                "Validation type. Use all unless another supported type is required.",
+            }),
+          ),
+        },
+        {
+          additionalProperties: false,
+        },
+      ),
+
+      async execute(_id, params) {
+        const toolId = params.toolId.trim();
+        const testType =
+          params.testType?.trim() || "all";
+
+        const response = await builderRequest(
+          "/run-tests",
+          {
+            method: "POST",
+            body: JSON.stringify({
+              toolId,
+              testType,
+            }),
+          },
+        );
+
+        return result(response);
+      },
+    });
+  },
+});
