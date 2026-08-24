@@ -3,6 +3,11 @@
   "name": "Jarvis Builder",
   "version": "1.0.0",
   "description": "OpenClaw tools for creating, inspecting and validating Jarvis Builder proposals.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  },
   "contracts": {
     "tools": [
       "jarvis_build_tool",
