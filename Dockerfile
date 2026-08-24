@@ -23,6 +23,7 @@ COPY package.json pnpm-lock.yaml ./
 RUN corepack enable && pnpm install --frozen-lockfile --prod
 
 COPY src ./src
+COPY extensions ./extensions
 COPY --chmod=755 entrypoint.sh ./entrypoint.sh
 
 RUN useradd -m -s /bin/bash openclaw \
@@ -43,7 +44,7 @@ ENV OPENCLAW_ENTRY=/usr/local/lib/node_modules/openclaw/dist/entry.js
 EXPOSE 8080
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
-  CMD curl -f http://localhost:8080/setup/healthz || exit 1
+  CMD curl -f http://localhost:8080/healthz || exit 1
 
 USER root
 ENTRYPOINT ["tini", "--", "./entrypoint.sh"]
